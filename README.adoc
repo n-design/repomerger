@@ -1,0 +1,173 @@
+= Repo Merger
+
+A collection of scripts to merge git repos while keeping their histories and
+some branches
+
+== Introduction
+
+This project contains several scripts that can be used to merge git repos. The
+scripts were originally designed to merge a software project that consisted of
+thirty repositories into one. The original repos all had a _main_ branch (of
+course) and several release branches that dated back only a few months.
+
+The original scenario consisted of thirty repositories that were all stored in
+the same GitLab group. During the build process, scripts would clone those repos
+under a common directory. The resulting directory structure looked like this:
+
+----
+~/upstream/
+ |- service01      <- The repo containing all source files for `service01`.
+ |- service02      <- The repo containing all source files for `service02`.
+ |- service03      <- The repo containing all source files for `service03`.
+ |- theapp         <- The repo containing the app that needs the services.
+----
+
+This structure is created by running the script `create-sample-repos.sh`. You
+can use this sample to get acquainted with the migration process before you try
+it with your own polyrepo.
+
+
+There were several requirements for the migration:
+
+* The process had to be automized as far as possible so that it could run over
+  and over during development until its final run in production.
+
+* The respective histories of all the git repos had to be maintained.
+
+* The _main_ branch and two release branches also had to be usable in the new repo
+
+NOTE: The collection of repos to be merged is henceforth called the
+_polyrepo_. The newly created merged repo is called the _monorepo_.
+
+NOTE: This collection of scripts is not supposed to work out of the box for any
+given scenario. Rather, it is to be assumed as a migration path that has to be
+customised to reflect the user's scenario.
+
+We first tried the process described in
+link:https://thoughts.t37.net/merging-2-different-git-repositories-without-losing-your-history-de7a06bba804[Merging
+2 Different Git Repositories Without Losing your History] by
+@fdevillamil. However, we needed more than the _main_ branch of the repos to be
+maintained in the merged repo.  So we added the _rebase_ phase. Then, however,
+it becomes a bit tricky to move files to a subdirectory. We found that the
+approach is prone to merge conflicts. It all worked a lot better when we started
+using `git-filter-repo` instead of the bash function to move „everything but
+itself“ to a subdirectory.
+
+== Prerequisites
+
+* link:https://github.com/newren/git-filter-repo[git-filter-repo] needs to be
+installed. This in turn requires git 2.25 or newer.
+
+* You need at least version 4 of bash. The stock bash in macOS is too old.
+
+== Setup: Configure your environment
+
+The scripts assume to be run in a tree that has the structure depicted
+below. They are not configurable on the command line but you can change
+directory names in the configuration file.
+
+----
+~/topleveldir/
+ |- repomerger    <- This repo
+ |- upstream      <- Contains the upstream polyrepo. 
+ |- polyrepo      <- Contains the polyrepo. Destructive changes will be made here
+ |- monorepo      <- Contains the monorepo. Directory will be erased and recreated.
+----
+
+===  Configuration Parameters
+
+The configuration file is called `set_environment.sh`. This bash file is sourced
+into any other script in the process.
+
+[cols="1,3"]
+|===
+| repos_file | List of repos that make up the polyrepo. Defaults to `repos.txt`.
+| polyrepoprefix | Common prefix of all repos in the polyrepo, e.g. a group in GitLab. Defaults to `git@github.com:repomerger`.
+| upstream | Directory will be created to contain the polyrepo. Used as a local cache to speed up repeated run. Defaults to `../upstream`.
+| polyrepo | Workspace for destructive changes to the polyrepo. Defaults to `../polyrepo`.
+| monorepodir | Directory that is created during the migration. Will be erased on every run. Defaults to `../monorepo`.
+| mainbranch | Name of the monorepo's main branch. Defaults to `main`.
+| branches | names of the branches to be migrated to the new repo. Defaults to `v1.0 v2.0 main`.
+|===
+
+Change `repos.txt` to contain the names of the repos in the polyrepo.
+
+== Stage 0: Fetching the polyrepo from remote
+
+`fetch-upstream.sh` fetches the polyrepo from the remote server. The polyrepo
+will be stored in the directory `$upstream`. During repeated trial runs, call
+this script whenever there are changes in the remote polyrepo that should be
+incorporated into the migration.
+
+== Stage 1: Preparing the polyrepo
+
+`reset.sh` creates clones of the repos in `$upstream` into directories under
+`polyrepo`. All old data will be deleted, so run this script whenever you need
+to revert the changes made by `prepare-polyrepo.sh`.
+
+`prepare-polyrepo.sh` prepares the polyrepo for the migration by doing several
+things:
+
+* Running `git-filter-repo` on the polyrepo to add a directory at the top level
+  to any of the repos in the polyrepo. In the example above, `git-filter-repo`
+  would move the contents of each repo (`service0...`) to a directory
+  `service0...` See the excellent documentation of `git-filter-repo` for
+  details.
+
+* `git-filter-repo` also rewrites the polyrepo's tag names. All tags are
+  maintained and moved to a new namespace `polyrepo/`.
+
+* Asserting the last common commit of the branches that shall be migrated to the
+  monorepo. `git merge-base` is called for all branches. The script then places
+  a tag at that commit for the next step in the process.
+
+This stage is probably where you will make adaptations to accommodate your
+polyrepo's particularities.
+
+== Stage 2: Initializing the monorepo
+
+`initialize-monorepo.sh` initializes the monorepo, adds a number of files and
+create the first commit. Anything that needs to be present in the monorepo after
+the migration should be added to the directory `skeleton` in this repo.
+
+== Stage 3: Migration
+
+The migration is split into two phases. The _merge_ phase and the _rebase_
+phase. See inline comments in the shell scripts.
+
+NOTE: If you only need to migrate the polyrepo's HEAD and no other branches, you
+can skip the _rebase_ phase.
+
+=== Stage 3.1: Merge
+
+`migrate-merge.sh` merges the polyrepo's repositories into the monorepo. The
+crucial part is the `--allow-unrelated-histories` parameter to `git merge`. This
+takes care of the fact that there is no common ancestor between the polyrepo and
+the monorepo.
+
+=== Stage 3.2: Rebase
+
+`migrate-rebase.sh` rebases the polyrepo's branches on top of the monorepo's
+merge commits that were created in the previous phase.
+
+== Stage 4: Finish
+
+`finish.sh` finishes the migration. Removes the remotes that point to the
+polyrepo, adjust committer names with `.mailmap` and add a remote for the
+polyrepo. This is a good place to add your own final touches to the monorepo.
+
+== Notes
+
+* The script `poly-to-monorepo.sh` summarizes all steps into a single
+  incantation.
+
+* The file name for the list of repos (`repos.txt`) can be stored in the
+  environment variable `repos`. This is helpful if you and want to migrate a
+  subset of you polyrepo. Create an addditional list `subset-of-repos.txt` and
+  set `repos=subset-of-repos.txt` before calling the shell scripts.
+
+* All git commands in the scripts are prefixed with the token variable
+  `$dry`. Set `dry=echo` for a dry run of the scripts. Remember that bash allows
+  you to set a variable only for a single command: `dry=echo
+  ./migrate-merge.sh`.
+
